@@ -31,7 +31,7 @@ main = run app
 
 This doesn't require any particular Lambda environment. By following the
 instructions in the [build](#build) section the resulting `zip` file uploaded
-to AWS Lambda is typically be smaller than 1MB. For basic webapps the request
+to AWS Lambda is typically smaller than 1MB. For basic webapps the request
 handling duration (as reported by AWS) is between 1 and 5 milliseconds.
 
 * [**Install**](#install) with either Cabal, stack or Nix.
