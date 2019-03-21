@@ -36,12 +36,26 @@ import qualified Network.Wai as Wai
 import qualified Network.Wai.Internal as Wai
 import qualified System.IO.Temp as Temp
 
+-- | The representation of the response sent back to API Gateway.
 type RawResponse = (H.Status, H.ResponseHeaders, BS.ByteString)
 
+-- | The settings for running an 'Application'.
+--
+-- See also:
+--  * 'runSettings'
+--
+-- For simplicity use the following setters with 'defaultSettings':
+--  * 'setTimeoutSeconds'
+--  * 'setHandleTimeout'
+--  * 'setHandleException'
+--
 data Settings = Settings
   { timeoutValue :: Int
+    -- ^ How many microseconds before we declare a timeout
   , handleTimeout :: BS.ByteString -> IO RawResponse
+    -- ^ How to handle a timeout
   , handleException :: BS.ByteString -> SomeException -> IO RawResponse
+    -- ^ How to handle an exception thrown by the 'Application'
   }
 
 -- | Run an 'Application'.
