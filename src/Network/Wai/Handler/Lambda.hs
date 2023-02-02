@@ -1,15 +1,22 @@
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -fno-warn-deprecations #-}
 
 module Network.Wai.Handler.Lambda where
 
 import Control.Concurrent (forkIO)
+import Control.DeepSeq (NFData)
 import Control.Monad
-import Data.Aeson ((.:), (.:?), (.!=))
+import Data.Aeson ((.:))
 import Data.Bifunctor
 import Data.Function (fix)
+import GHC.Generics (Generic)
 import Network.Wai (Application)
 import System.Directory (renameFile)
 import System.IO.Unsafe
@@ -198,115 +205,126 @@ decodeInput = Aeson.eitherDecodeStrictWith Aeson.jsonEOF $ Aeson.iparse $
         obj .: "responseFile" <*>
         (obj .: "request" >>= parseRequest)
 
+data ApiGatewayRequestV2 = ApiGatewayRequestV2
+  { body :: !(Maybe T.Text)
+  , headers :: !(HMap.HashMap T.Text T.Text)
+  , rawQueryString :: !T.Text
+  , requestContext :: !RequestContext
+  , cookies :: ![T.Text]
+  , isBase64Encoded :: !Bool
+  }
+  deriving (Show, Generic, Aeson.ToJSON, Aeson.FromJSON, NFData)
+
+data RequestContext = RequestContext
+  { accountId :: !T.Text
+  , apiId :: !T.Text
+  , domainName :: !T.Text
+  , http :: Http
+  , requestId :: !T.Text
+  }
+  deriving (Show, Generic, Aeson.ToJSON, Aeson.FromJSON, NFData)
+
+data Http = Http
+  { method :: !T.Text
+  , path :: !T.Text
+  , protocol :: !T.Text
+  , sourceIp :: !T.Text
+  }
+  deriving (Show, Generic, Aeson.ToJSON, Aeson.FromJSON, NFData)
+
 -- | Parser for a 'Wai.Request'.
 --
 -- The input is an AWS API Gateway request event:
 -- https://docs.aws.amazon.com/lambda/latest/dg/eventsources.html#eventsources-api-gateway-request
-parseRequest :: Aeson.Value -> Aeson.Parser (IO Wai.Request)
-parseRequest = Aeson.withObject "request" $ \obj -> do
+parseRequest :: Aeson.Object -> Aeson.Parser (IO Wai.Request)
+parseRequest obj = do
+  ApiGatewayRequestV2
+    { body
+    , headers
+    , rawQueryString
+    , cookies
+    , requestContext = RequestContext
+      { http = Http
+        { method
+        , protocol
+        , path
+        , sourceIp
+        }
+      }
+    } <- Aeson.parseJSON (Aeson.Object obj)
 
-    -- "httpMethod": "GET"
-    requestMethod <- obj .: "httpMethod" >>=
-      Aeson.withText "requestMethod" (pure . T.encodeUtf8)
+  -- We don't get data about the version, just assume
+  httpVersion <- case CI.mk protocol of
+    "http/0.9" -> pure H.http09
+    "http/1.0" -> pure H.http10
+    "http/1.1" -> pure H.http11
+    "http/2.0" -> pure H.http20
+    _ -> fail $ "Unknown http protocol " <> T.unpack protocol
 
-    -- We don't get data about the version, just assume
-    httpVersion <- pure H.http11
+  --  "headers": {
+  --    "Accept": "text/html,application/xhtml+xml,...",
+  --    ...
+  --    "X-Forwarded-Proto": "https"
+  --  },
+  let
+    cookieHeaders = (\c -> (H.hCookie, T.encodeUtf8 c)) <$> cookies
+    otherHeaders = (\(k,v) -> (CI.mk (T.encodeUtf8 k),T.encodeUtf8 v)) <$> HMap.toList headers
+    requestHeaders = otherHeaders <> cookieHeaders
 
-    -- "queryStringParameters": {
-    --    "name": "me"
-    --  },
-    -- XXX: default to empty object for the query params as Lambda doesn't set
-    -- 'queryStringParameters' if there are no query parameters
-    queryParams <- obj .:? "queryStringParameters" .!= Aeson.Object HMap.empty >>=
-      Aeson.withObject "queryParams" (
-        fmap
-          (fmap (first T.encodeUtf8) . HMap.toList ) .
-          traverse (Aeson.withText "queryParam" (pure . T.encodeUtf8))
-      )
+  isSecure <- pure $ case lookup "X-Forwarded-Proto" requestHeaders of
+    Just "https" -> True
+    _ -> False
 
-    rawQueryString <- pure $ H.renderSimpleQuery True queryParams
+  let rawPathInfo = T.encodeUtf8 path
+  pathInfo <- pure $ H.decodePathSegments rawPathInfo
 
-    -- "path": "/test/hello",
-    path <- obj .: "path" >>=
-      Aeson.withText "path" (pure . T.encodeUtf8)
+  remoteHost <- case readMaybe @IP.IP (T.unpack sourceIp) of
+    Just (IP.IPv4 ip) -> pure $ Socket.SockAddrInet 0 (IP.toHostAddress ip)
+    Just (IP.IPv6 ip) -> pure $ Socket.SockAddrInet6 0 0 (IP.toHostAddress6 ip) 0
+    _ -> fail $ "Could not parse ip address: " <> T.unpack sourceIp
 
-    rawPathInfo <- pure $ path <> rawQueryString
+  let
+    rawQueryStringBytes = T.encodeUtf8 rawQueryString
+    queryString = H.parseQuery (rawQueryStringBytes)
 
-    --  "headers": {
-    --    "Accept": "text/html,application/xhtml+xml,...",
-    --    ...
-    --    "X-Forwarded-Proto": "https"
-    --  },
-    requestHeaders <- obj .: "headers" >>=
-      Aeson.withObject "headers" (
-        fmap
-          (fmap (first (CI.mk . T.encodeUtf8)) . HMap.toList) .
-          traverse (Aeson.withText "header" (pure . T.encodeUtf8))
-      )
+  -- XXX: default to empty body as Lambda doesn't always set one (e.g. GET
+  -- requests)
+  let requestBodyRaw = maybe "" T.encodeUtf8 body
+  requestBodyLength <- pure $
+    Wai.KnownLength $ fromIntegral $ BS.length requestBodyRaw
 
-    isSecure <- pure $ case lookup "X-Forwarded-Proto" requestHeaders of
-      Just "https" -> True
-      _ -> False
+  vault <- pure $ Vault.insert originalRequestKey obj Vault.empty
 
+  requestHeaderHost <- pure $ lookup "host" requestHeaders
+  requestHeaderRange <- pure $ lookup "range" requestHeaders
+  requestHeaderReferer <- pure $ lookup "referer" requestHeaders
+  requestHeaderUserAgent <- pure $ lookup "User-Agent" requestHeaders
 
-    --  "requestContext": {
-    --    ...
-    --    "identity": {
-    --      ...
-    --      "sourceIp": "192.168.100.1",
-    --    },
-    --    ...
-    --  },
-    remoteHost <- obj .: "requestContext" >>=
-      Aeson.withObject "requestContext" (\obj' ->
-        obj' .: "identity" >>=
-          Aeson.withObject "identity" (\idt -> do
-              sourceIp <- case HMap.lookup "sourceIp" idt of
-                Nothing -> fail "no sourceIp"
-                Just (Aeson.String x) -> pure $ T.unpack x
-                Just _ -> fail "bad type for sourceIp"
-              ip <- case readMaybe sourceIp of
-                Just ip -> pure ip
-                Nothing -> fail "cannot parse sourceIp"
+  pure $ do
+    requestBodyMVar <- newMVar requestBodyRaw
+    let requestBody = do
+          tryTakeMVar requestBodyMVar >>= \case
+            Just bs -> pure bs
+            Nothing -> pure BS.empty
 
-              pure $ case ip of
-                IP.IPv4 ip4 ->
-                  Socket.SockAddrInet
-                    0 -- default port
-                    (IP.toHostAddress ip4)
-                IP.IPv6 ip6 ->
-                  Socket.SockAddrInet6
-                    0 -- default port
-                    0 -- flow info
-                    (IP.toHostAddress6 ip6)
-                    0 -- scope id
-          )
-      )
-
-    pathInfo <- pure $ H.decodePathSegments path
-    queryString <- pure $ H.parseQuery rawQueryString
-
-    -- XXX: default to empty body as Lambda doesn't always set one (e.g. GET
-    -- requests)
-    requestBodyRaw <- obj .:? "body" .!= Aeson.String "" >>=
-      Aeson.withText "body" (pure . T.encodeUtf8)
-    requestBodyLength <- pure $
-      Wai.KnownLength $ fromIntegral $ BS.length requestBodyRaw
-
-    vault <- pure $ Vault.insert originalRequestKey obj Vault.empty
-
-    requestHeaderHost <- pure $ lookup "host" requestHeaders
-    requestHeaderRange <- pure $ lookup "range" requestHeaders
-    requestHeaderReferer <- pure $ lookup "referer" requestHeaders
-    requestHeaderUserAgent <- pure $ lookup "User-Agent" requestHeaders
-
-    pure $ do
-      requestBodyMVar <- newMVar requestBodyRaw
-      let requestBody = do
-            tryTakeMVar requestBodyMVar >>= \case
-              Just bs -> pure bs
-              Nothing -> pure BS.empty
-      pure $ Wai.Request {..}
+    pure $ Wai.Request
+        { requestMethod = T.encodeUtf8 method
+        , httpVersion
+        , rawPathInfo
+        , rawQueryString = rawQueryStringBytes
+        , queryString
+        , requestBodyLength
+        , requestHeaderHost
+        , requestHeaderUserAgent
+        , requestHeaderRange
+        , requestHeaderReferer
+        , requestHeaders
+        , isSecure
+        , remoteHost
+        , pathInfo
+        , requestBody
+        , vault
+        }
 
 originalRequestKey :: Vault.Key Aeson.Object
 originalRequestKey = unsafePerformIO Vault.newKey
@@ -329,12 +347,14 @@ readResponse (Wai.responseToStream -> (st, hdrs, mkBody)) = do
 -- | Make an API Gateway response from status, headers and body.
 -- https://docs.aws.amazon.com/lambda/latest/dg/eventsources.html#eventsources-api-gateway-response
 toJSONResponse :: H.Status -> H.ResponseHeaders -> BS.ByteString -> Aeson.Object
-toJSONResponse st hdrs body = HMap.fromList
-    [ ("statusCode", Aeson.Number (fromIntegral (H.statusCode st)))
-    , ("headers", Aeson.toJSON $ HMap.fromList $
-        (bimap T.decodeUtf8 T.decodeUtf8 . first CI.original) <$> hdrs)
-    , ("body", Aeson.String (T.decodeUtf8 body))
-    ]
+toJSONResponse st hdrs body =
+  let Aeson.Object obj = Aeson.object
+                         [ ("statusCode", Aeson.Number (fromIntegral (H.statusCode st)))
+                         , ("headers", Aeson.toJSON $ HMap.fromList $
+                             (bimap T.decodeUtf8 T.decodeUtf8 . first CI.original) <$> hdrs)
+                         , ("body", Aeson.String (T.decodeUtf8 body))
+                         ]
+  in obj
 
 -------------------------------------------------------------------------------
 -- Auxiliary
