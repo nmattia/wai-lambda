@@ -16,6 +16,8 @@ import Control.Monad
 import Data.Aeson ((.:))
 import Data.Bifunctor
 import Data.Function (fix)
+import Data.List (partition)
+import Data.Maybe (fromMaybe)
 import GHC.Generics (Generic)
 import Network.Wai (Application)
 import System.Directory (renameFile)
@@ -208,9 +210,9 @@ decodeInput = Aeson.eitherDecodeStrictWith Aeson.jsonEOF $ Aeson.iparse $
 data ApiGatewayRequestV2 = ApiGatewayRequestV2
   { body :: !(Maybe T.Text)
   , headers :: !(HMap.HashMap T.Text T.Text)
-  , rawQueryString :: !T.Text
+  , rawQueryString :: !(Maybe T.Text)
   , requestContext :: !RequestContext
-  , cookies :: ![T.Text]
+  , cookies :: !(Maybe [T.Text])
   , isBase64Encoded :: !Bool
   }
   deriving (Show, Generic, Aeson.ToJSON, Aeson.FromJSON, NFData)
@@ -267,7 +269,7 @@ parseRequest obj = do
   --    "X-Forwarded-Proto": "https"
   --  },
   let
-    cookieHeaders = (\c -> (H.hCookie, T.encodeUtf8 c)) <$> cookies
+    cookieHeaders = (\c -> (H.hCookie, T.encodeUtf8 c)) <$> fromMaybe [] cookies
     otherHeaders = (\(k,v) -> (CI.mk (T.encodeUtf8 k),T.encodeUtf8 v)) <$> HMap.toList headers
     requestHeaders = otherHeaders <> cookieHeaders
 
@@ -284,7 +286,7 @@ parseRequest obj = do
     _ -> fail $ "Could not parse ip address: " <> T.unpack sourceIp
 
   let
-    rawQueryStringBytes = T.encodeUtf8 rawQueryString
+    rawQueryStringBytes = maybe "" T.encodeUtf8 rawQueryString
     queryString = H.parseQuery (rawQueryStringBytes)
 
   -- XXX: default to empty body as Lambda doesn't always set one (e.g. GET
@@ -348,12 +350,16 @@ readResponse (Wai.responseToStream -> (st, hdrs, mkBody)) = do
 -- https://docs.aws.amazon.com/lambda/latest/dg/eventsources.html#eventsources-api-gateway-response
 toJSONResponse :: H.Status -> H.ResponseHeaders -> BS.ByteString -> Aeson.Object
 toJSONResponse st hdrs body =
-  let Aeson.Object obj = Aeson.object
-                         [ ("statusCode", Aeson.Number (fromIntegral (H.statusCode st)))
-                         , ("headers", Aeson.toJSON $ HMap.fromList $
-                             (bimap T.decodeUtf8 T.decodeUtf8 . first CI.original) <$> hdrs)
-                         , ("body", Aeson.String (T.decodeUtf8 body))
-                         ]
+  let
+    (setCookieHeaders, otherHeaders) = partition (\(k,_) -> k == "set-cookie") hdrs
+    Aeson.Object obj =
+      Aeson.object
+        [ ("statusCode", Aeson.Number (fromIntegral (H.statusCode st)))
+        , ("headers", Aeson.toJSON $ HMap.fromList $
+            (bimap T.decodeUtf8 T.decodeUtf8 . first CI.original) <$> otherHeaders)
+        , ("cookies", Aeson.toJSON (T.decodeUtf8 . snd <$> setCookieHeaders))
+        , ("body", Aeson.String (T.decodeUtf8 body))
+        ]
   in obj
 
 -------------------------------------------------------------------------------
