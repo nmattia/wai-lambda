@@ -1,0 +1,83 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.34.7.
+--
+-- see: https://github.com/sol/hpack
+
+name:           wai-lambda
+version:        0.1.1.0
+synopsis:       Haskell Webapps on AWS Lambda
+description:    .
+                ![wai-lambda](https://github.com/deckgo/wai-lambda/raw/master/assets/wai-lambda-small.png)
+                .
+                Turn any [wai](https://www.stackage.org/package/wai) webapp ( [spock](https://www.spock.li/), [servant](https://docs.servant.dev/en/stable/), etc) into a handler for AWS [Lambda](https://aws.amazon.com/lambda/) and [API Gateway](https://aws.amazon.com/api-gateway/) requests.
+                .
+                Works with any Lambda environment (nodejs, python, etc). Find out more in the [README](https://github.com/deckgo/wai-lambda#wai-lambda---haskell-webapps-on-aws-lambda).
+category:       Web
+homepage:       https://github.com/deckgo/wai-lambda#readme
+bug-reports:    https://github.com/deckgo/wai-lambda/issues
+author:         Nicolas Mattia <nicolas@nmattia.com>
+maintainer:     Nicolas Mattia <nicolas@nmattia.com>
+copyright:      (c) 2019 David Dal Busco and Nicolas Mattia
+license:        MIT
+license-file:   LICENSE
+build-type:     Simple
+extra-source-files:
+    README.md
+
+source-repository head
+  type: git
+  location: https://github.com/deckgo/wai-lambda
+
+library
+  exposed-modules:
+      Lambda
+      Network.Wai.Handler.Lambda
+  other-modules:
+      Paths_wai_lambda
+  hs-source-dirs:
+      ./src
+  ghc-options: -Wall
+  build-depends:
+      aeson
+    , base <5
+    , binary
+    , bytestring
+    , case-insensitive
+    , deepseq
+    , directory
+    , http-types
+    , iproute
+    , network
+    , temporary
+    , text
+    , unliftio
+    , unordered-containers
+    , vault
+    , wai
+  default-language: Haskell2010
+
+executable wai-lambda
+  main-is: examples/Hello.hs
+  other-modules:
+      Paths_wai_lambda
+  ghc-options: -Wall
+  build-depends:
+      aeson
+    , base <5
+    , binary
+    , bytestring
+    , case-insensitive
+    , deepseq
+    , directory
+    , http-types
+    , iproute
+    , network
+    , temporary
+    , text
+    , unliftio
+    , unordered-containers
+    , vault
+    , wai
+    , wai-lambda
+  default-language: Haskell2010
